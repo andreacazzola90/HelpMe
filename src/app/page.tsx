@@ -1,3 +1,3 @@
-import { Access } from "@/components/access";
+import { Access } from "@/components/appwrite-access";
 
 export default function Page() { return <Access />; }

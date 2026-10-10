@@ -1,5 +1,7 @@
 # Accesso personale con passkey sperimentali
 
+Decisione superata per il fornitore di autenticazione da [0002: Appwrite](0002-appwrite-database-auth.md). Restano validi l'uso personale e il dominio stabile; il contenuto seguente documenta la scelta precedente.
+
 Per l'app a uso esclusivamente personale scegliamo email e password con secondo fattore TOTP tramite Supabase Auth, mantenendo questo percorso disponibile anche quando non si puo usare una passkey. Accettiamo nella prima versione le passkey di Supabase come accesso alternativo, nonostante il supporto sperimentale, per consentire l'autenticazione tramite il dispositivo senza raccogliere dati biometrici; il dispositivo puo usare biometria o PIN.
 
 ## Conseguenze

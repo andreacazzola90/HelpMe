@@ -1,10 +1,12 @@
 import "server-only";
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { createBankToken } from "./bank-token";
 import { adminDb, HttpError, required, saveImported } from "./server";
 import { categorize, inferKind, parseDate, parseMoney, type Rule } from "./finance";
 import type { Imported } from "./csv";
+import type { RecordData } from "./appwrite-store";
+type Connection = RecordData & { account_key: string; account_uid: string; session_encrypted: string; valid_until: string; synced_at: string | null };
 
 export async function banking(path: string, body?: unknown) {
   const token = await createBankToken(required("ENABLE_BANKING_APP_ID"), required("ENABLE_BANKING_PRIVATE_KEY"));
@@ -64,11 +66,9 @@ export function normalizeBankTransactions(rows: unknown[], account: string, rule
 
 export async function syncBank(owner: string) {
   const db = adminDb();
-  const { data: connections, error } = await db.from("bank_connections").select("*");
-  if (error) throw new HttpError(500, "Schema bancario non configurato");
+  const connections = await db.list<Connection>("bank_connections");
   if (!connections?.length) throw new HttpError(409, "Collega Fineco prima di sincronizzare");
-  const { data: rules, error: rulesError } = await db.from("rules").select("*");
-  if (rulesError) throw new HttpError(500, "Categorie non disponibili");
+  const rules = await db.list<Rule & RecordData>("rules");
   let inserted = 0;
   for (const connection of connections) {
     try {
@@ -90,12 +90,11 @@ export async function syncBank(owner: string) {
       } while (continuation);
       inserted += await saveImported(owner, normalizeBankTransactions(rows, connection.account_key, rules || []));
       const balance = await banking(`/accounts/${encodeURIComponent(connection.account_uid)}/balances`);
-      const { error: updateError } = await db.from("bank_connections").update({ synced_at: new Date().toISOString(), balance, last_error: null }).eq("account_key", connection.account_key);
-      if (updateError) throw new HttpError(500, "Aggiornamento del collegamento non riuscito");
-      if (start) await db.from("coverage").insert({ account_key: connection.account_key, from_date: start, to_date: new Date().toISOString().slice(0, 10), source: "api", verified: true });
+      await db.update("bank_connections", connection.id, { synced_at: new Date().toISOString(), balance, last_error: null });
+      if (start) await db.create("coverage", { id: randomUUID(), account_key: connection.account_key, from_date: start, to_date: new Date().toISOString().slice(0, 10), source: "api", verified: true });
     } catch (error) {
       const message = error instanceof HttpError ? error.message : "Sincronizzazione non riuscita: verifica connessione e formato dei dati";
-      await db.from("bank_connections").update({ last_error: message }).eq("account_key", connection.account_key);
+      await db.update("bank_connections", connection.id, { last_error: message });
       throw new HttpError(error instanceof HttpError ? error.status : 502, message);
     }
   }

@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const config: NextConfig = {
+  distDir: process.env.APPWRITE_TEST_SERVER === "1" ? ".next-appwrite-test" : ".next",
   poweredByHeader: false,
   async headers() {
     return [{ source: "/(.*)", headers: [

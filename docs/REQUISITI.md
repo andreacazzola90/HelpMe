@@ -12,10 +12,11 @@ Requisiti confermati dal proprietario al termine della sessione di chiarimento. 
 ## Accesso e pubblicazione
 
 - Pubblicazione su Vercel con indirizzo gratuito di produzione `nome-app.vercel.app`; nome e disponibilita da verificare.
-- Supabase per database e autenticazione.
+- Appwrite per database e autenticazione, in sostituzione di Supabase su richiesta del proprietario.
+- Creazione del primo account dalla schermata di accesso locale con email e password, senza dover inserire prima l'email nelle variabili. Il proprietario viene salvato nel database e le registrazioni successive restano chiuse; conferma email e attivazione MFA prima dell'accesso ai dati. Sul deploy pubblico la prima email va preautorizzata se non e gia stato creato il proprietario.
 - Email e password con secondo fattore tramite app Authenticator.
 - Passkey come accesso alternativo, con possibile verifica biometrica sul dispositivo o PIN, senza raccolta di dati biometrici nell'app.
-- Supporto sperimentale delle passkey accettato; percorso email, password e Authenticator mantenuto disponibile.
+- Passkey WebAuthn tramite token personalizzato Appwrite; Authenticator richiesto anche dopo il login passkey. Percorso email, password e Authenticator mantenuto disponibile.
 - Accesso ai dati riservato al proprietario e protetto anche nel database e nelle API, non soltanto nell'interfaccia.
 - Dominio di produzione stabile per le passkey; non usare i domini temporanei delle anteprime.
 
@@ -52,11 +53,12 @@ Requisiti confermati dal proprietario al termine della sessione di chiarimento. 
 - Disponibilita Fineco su Enable Banking, conti e dettagli accessibili, storico e limiti di sincronizzazione effettivi.
 - Applicabilita della modalita gratuita ai propri conti e dei relativi termini e quote.
 - Formato CSV effettivamente esportabile da Fineco e riconoscimento dei duplicati tra fonti.
-- Disponibilita delle passkey sul progetto Supabase e verifica delle sessioni e delle autorizzazioni per entrambi i percorsi di accesso.
+- Registrazione e uso delle passkey sul dominio definitivo e sui dispositivi fisici, dopo verifica con autenticatore virtuale.
 - Configurazione del recupero dell'accesso e rinnovo del consenso bancario, senza esposizione di segreti in chat.
-- Limiti e costi dei piani Vercel e Supabase, incluso il processo pianificato giornaliero; indirizzo finale di produzione.
+- Limiti e costi dei piani Vercel e Appwrite, incluso il processo pianificato giornaliero; indirizzo finale di produzione.
 
 ## Riferimenti
 
 - [Glossario del dominio](../CONTEXT.md)
 - [Decisione sull'accesso](adr/0001-accesso-personale-con-passkey.md)
+- [Migrazione ad Appwrite](adr/0002-appwrite-database-auth.md)
