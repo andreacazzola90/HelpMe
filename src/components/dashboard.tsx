@@ -1,0 +1,194 @@
+"use client";
+
+import { useDeferredValue, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { ArrowDownLeft, ArrowDownToLine, ArrowRight, ArrowUpRight, CalendarDays, ChartNoAxesCombined, ChevronLeft, ChevronRight, CircleHelp, CreditCard, Download, Fingerprint, LayoutDashboard, ListFilter, LoaderCircle, LogOut, Plus, RefreshCw, Search, Settings2, ShieldCheck, SlidersHorizontal, Trash2, Upload, Wallet, X } from "lucide-react";
+import { activeTransactions, analyze, buildTrend, categorize, colors, money, parseMoney, reconciliationCandidates, trendLabel, type Kind, type Rule, type Transaction } from "@/lib/finance";
+import { exportCsv, importCsv, readCsv, type CsvMapping } from "@/lib/csv";
+import { demoData } from "@/lib/demo";
+import { browserDb } from "@/lib/supabase-browser";
+
+type Bank = { account_key: string; valid_until: string; synced_at: string | null; last_error: string | null; balance: { balances?: { balance_amount: { amount: string; currency: string }; balance_type: string }[] } | null };
+type Dataset = { transactions: Transaction[]; rules: Rule[]; categories: { name: string; color: string }[]; bank: Bank[]; coverage: { account_key: string; from_date: string; to_date: string; verified: boolean }[] };
+type View = "overview" | "movements" | "categories" | "settings";
+type Modal = "manual" | "import" | "edit" | null;
+const labels: Record<Kind, string> = { expense: "Spesa", income: "Entrata", refund: "Rimborso", withdrawal: "Prelievo", transfer: "Trasferimento" };
+const views = [{ id: "overview", label: "Panoramica", icon: LayoutDashboard }, { id: "movements", label: "Movimenti", icon: Wallet }, { id: "categories", label: "Categorie", icon: SlidersHorizontal }, { id: "settings", label: "Sicurezza", icon: ShieldCheck }] as const;
+const empty: Dataset = { transactions: [], rules: [], categories: [], bank: [], coverage: [] };
+const localDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+const shortDate = (value: string) => new Date(value + "T12:00:00").toLocaleDateString("it-IT", { day: "2-digit", month: "short" });
+
+function IconButton({ title, children, onClick, disabled }: { title: string; children: ReactNode; onClick: () => void; disabled?: boolean }) {
+  return <button className="icon-button" type="button" title={title} aria-label={title} onClick={onClick} disabled={disabled}>{children}</button>;
+}
+
+export function Dashboard({ demo = false }: { demo?: boolean }) {
+  const [data, setData] = useState<Dataset>(demo ? demoData : empty);
+  const [view, setView] = useState<View>("overview");
+  const [loading, setLoading] = useState(!demo);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [modal, setModal] = useState<Modal>(null);
+  const [editing, setEditing] = useState<Transaction | null>(null);
+  const now = demo ? new Date("2026-10-10T12:00:00") : new Date();
+  const [from, setFrom] = useState(localDate(new Date(now.getFullYear(), now.getMonth(), 1)));
+  const [to, setTo] = useState(localDate(now));
+  const [period, setPeriod] = useState("month");
+  const [category, setCategory] = useState("");
+  const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
+  const [kind, setKind] = useState("");
+  const [page, setPage] = useState(0);
+  const [csv, setCsv] = useState("");
+  const [headers, setHeaders] = useState<string[]>([]);
+  const [mapping, setMapping] = useState<CsvMapping>({ date: "", description: "", amount: "", locale: "it", account: "" });
+  const [importError, setImportError] = useState("");
+  const [factorList, setFactorList] = useState<{ id: string; friendly_name?: string | null }[]>([]);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const stats = analyze(data.transactions, from, to, category || undefined);
+  const transactions = [...stats.selected].sort((first, second) => second.date.localeCompare(first.date)).filter(transaction => transaction.description.toLowerCase().includes(deferredSearch.toLowerCase()) && (!kind || transaction.kind === kind));
+  const uncategorized = activeTransactions(data.transactions).filter(transaction => !transaction.category && transaction.kind === "expense").length;
+  const pending = data.transactions.flatMap(transaction => reconciliationCandidates(transaction, data.transactions).map(bank => ({ manual: transaction, bank })));
+  const dates = data.transactions.map(transaction => transaction.date).sort();
+  const timeline = buildTrend(stats.selected, from, to);
+
+  async function reload() {
+    if (demo) return;
+    setLoading(true);
+    try { const response = await fetch("/api/data", { cache: "no-store" }); const result = await response.json(); if (!response.ok) throw new Error(result.error); setData(result); }
+    catch (error) { setNotice((error as Error).message); }
+    finally { setLoading(false); }
+  }
+  useEffect(() => { if (!demo) void reload(); }, [demo]);
+  useEffect(() => { setPage(0); }, [from, to, deferredSearch, kind, category]);
+  useEffect(() => { if (modal) dialogRef.current?.showModal(); else dialogRef.current?.close(); }, [modal]);
+
+  async function mutate(input: Record<string, unknown>) {
+    if (!demo) { const response = await fetch("/api/data", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }); const result = await response.json(); if (!response.ok) throw new Error(result.error); await reload(); return result; }
+    const next = { ...data, transactions: [...data.transactions], rules: [...data.rules], categories: [...data.categories] };
+    if (input.action === "manual") next.transactions.push({ id: crypto.randomUUID(), account_key: String(input.account_key), date: String(input.date), description: String(input.description), amount_cents: Number(input.amount_cents), kind: input.kind as Kind, category: input.category as string | null || categorize(String(input.description), next.rules), source: "manual", currency: "EUR", reconciled_to: null, refund_of: input.refund_of as string | null });
+    if (input.action === "edit") next.transactions = next.transactions.map(transaction => transaction.id === input.id ? { ...transaction, category: input.category as string | null, kind: input.kind as Kind, refund_of: input.refund_of as string | null } : transaction);
+    if (input.action === "delete") next.transactions = next.transactions.filter(transaction => transaction.id !== input.id);
+    if (input.action === "reconcile") {
+      const manual = next.transactions.find(transaction => transaction.id === input.manual)!;
+      next.transactions = next.transactions.map(transaction => transaction.id === input.manual ? { ...transaction, reconciled_to: String(input.bank) } : transaction.id === input.bank ? { ...transaction, date: manual.date, category: manual.category || transaction.category } : transaction);
+    }
+    if (input.action === "category") { next.categories = next.categories.filter(item => item.name !== input.name); next.categories.push({ name: String(input.name), color: String(input.color) }); }
+    if (input.action === "renameCategory") {
+      if (next.categories.some(item => item.name === input.newName)) throw new Error("Categoria gia esistente");
+      next.categories = next.categories.map(item => item.name === input.oldName ? { ...item, name: String(input.newName) } : item);
+      next.transactions = next.transactions.map(item => item.category === input.oldName ? { ...item, category: String(input.newName) } : item);
+      next.rules = next.rules.map(item => item.category === input.oldName ? { ...item, category: String(input.newName) } : item);
+    }
+    if (input.action === "rule") { next.rules = next.rules.filter(rule => rule.pattern !== input.pattern); next.rules.push({ id: crypto.randomUUID(), pattern: String(input.pattern), category: String(input.category), priority: Number(input.priority) }); }
+    if (input.action === "deleteRule") next.rules = next.rules.filter(rule => rule.id !== input.id);
+    if (input.action === "applyRules") next.transactions = next.transactions.map(transaction => ({ ...transaction, category: transaction.category || categorize(transaction.description, next.rules) }));
+    if (input.action === "import") {
+      const imported = importCsv(String(input.csv), input.mapping as CsvMapping, next.rules);
+      if (imported.errors.length) throw new Error(imported.errors[0]);
+      for (const transaction of imported.transactions) next.transactions.push({ ...transaction, id: crypto.randomUUID(), reconciled_to: null, refund_of: null });
+    }
+    setData(next);
+    return { ok: true };
+  }
+  async function run(operation: () => Promise<void>) {
+    setBusy(true); setNotice("");
+    try { await operation(); } catch (error) { setNotice((error as Error).message); } finally { setBusy(false); }
+  }
+  function setRange(value: string) {
+    setPeriod(value);
+    if (value === "custom") return;
+    if (value === "all") { if (dates.length) { setFrom(dates[0]); setTo(dates.at(-1)!); } return; }
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    const end = new Date(now);
+    if (value === "previous") { start.setMonth(start.getMonth() - 1); end.setDate(0); }
+    if (["3", "6", "12"].includes(value)) start.setMonth(start.getMonth() - Number(value) + 1);
+    setFrom(localDate(start)); setTo(localDate(end));
+  }
+  async function saveManual(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form = new FormData(event.currentTarget);
+    await run(async () => {
+      const selectedKind = String(form.get("kind")) as Kind;
+      const value = Math.abs(parseMoney(String(form.get("amount"))));
+      const signed = selectedKind === "income" || selectedKind === "refund" ? value : -value;
+      await mutate({ action: "manual", date: form.get("date"), description: form.get("description"), amount_cents: signed, kind: selectedKind, category: form.get("category") || null, account_key: form.get("account"), refund_of: form.get("refund_of") || null });
+      setModal(null); setNotice("Movimento aggiunto");
+    });
+  }
+  function download() {
+    const url = URL.createObjectURL(new Blob([exportCsv(transactions)], { type: "text/csv;charset=utf-8" })); const link = document.createElement("a"); link.href = url; link.download = `helpme-${from}-${to}.csv`; link.click(); URL.revokeObjectURL(url);
+  }
+  const categorySelect = (name: string, value?: string | null, includeEmpty = true) => <select aria-label="Categoria" name={name} defaultValue={value || ""} required={!includeEmpty}>{includeEmpty && <option value="">Da categorizzare</option>}{data.categories.map(item => <option key={item.name}>{item.name}</option>)}</select>;
+  const kindSelect = (value: Kind = "expense") => <select aria-label="Tipo" name="kind" defaultValue={value}>{Object.entries(labels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select>;
+  const refundSelect = (value?: string | null) => <select aria-label="Spesa originale" name="refund_of" defaultValue={value || ""}><option value="">Nessuna spesa collegata</option>{activeTransactions(data.transactions).filter(transaction => transaction.kind === "expense" && transaction.currency === "EUR" && transaction.id !== editing?.id).map(transaction => <option key={transaction.id} value={transaction.id}>{shortDate(transaction.date)} · {transaction.description} · {money(Math.abs(transaction.amount_cents))}</option>)}</select>;
+  let preview: ReturnType<typeof importCsv> | null = null;
+  if (csv && mapping.date && mapping.amount && mapping.description && mapping.account) { try { preview = importCsv(csv, mapping, data.rules); } catch { preview = null; } }
+
+  return <div className="app-shell">
+    <aside className="sidebar"><a className="wordmark" href={demo ? "/demo" : "/"}><span className="brand-icon"><ChartNoAxesCombined size={21} /></span>HelpMe<span className="wordmark-dot">.</span></a>
+      <div className="workspace-label">SPAZIO PERSONALE</div><nav aria-label="Navigazione principale">{views.map(item => <button key={item.id} className={view === item.id ? "nav-item active" : "nav-item"} onClick={() => setView(item.id)}><item.icon size={19} /><span>{item.label}</span>{item.id === "movements" && uncategorized > 0 && <span className="nav-count">{uncategorized}</span>}</button>)}</nav>
+      <div className="sidebar-account"><div className="bank-emblem">F</div><div><strong>Fineco</strong><span>{demo ? "Conto dimostrativo" : data.bank.length ? "Conto collegato" : "Non collegato"}</span></div><span className={`status-dot ${!data.bank.length ? "muted" : ""}`} /></div>
+      <div className="sidebar-bottom"><div className="avatar">P</div><div><strong>Profilo personale</strong><span>{demo ? "Anteprima" : "Accesso riservato"}</span></div><IconButton title={demo ? "Torna al login" : "Esci"} onClick={() => void run(async () => { if (!demo) await browserDb()?.auth.signOut(); location.assign("/"); })}><LogOut size={17} /></IconButton></div>
+    </aside>
+    <div className="app-main">
+      {demo && <div className="demo-banner"><span><CircleHelp size={15} /> Anteprima · dati fittizi · modifiche solo in questa sessione</span><a href="/">Accedi al tuo spazio<ArrowRight size={14} /></a></div>}
+      <header className="topbar"><span className="breadcrumb">Spazio personale <ChevronRight size={14} /> <strong>{views.find(item => item.id === view)?.label}</strong></span><div className="topbar-status"><ShieldCheck size={16} /><span>{demo ? "Demo" : "Sessione protetta"}</span></div></header>
+      <main className="content">
+        <div className="page-heading"><div><div className="eyebrow">IL TUO QUADRO FINANZIARIO</div><h1>{view === "overview" ? "Panoramica" : views.find(item => item.id === view)?.label}</h1><p>{view === "overview" ? "Un punto di vista chiaro sulle tue finanze." : view === "movements" ? "Ogni movimento, al posto giusto." : view === "categories" ? "Categorie e regole del tuo spazio personale." : "Accesso, dispositivi e collegamento bancario."}</p></div><div className="heading-actions"><button className="secondary" disabled={busy} onClick={() => { setCsv(""); setHeaders([]); setImportError(""); setModal("import"); }}><Upload size={16} />Importa CSV</button><button className="primary" disabled={busy} onClick={() => setModal("manual")}><Plus size={18} />Aggiungi movimento</button></div></div>
+        {notice && <div className="notice" role="status">{notice}<IconButton title="Chiudi messaggio" onClick={() => setNotice("")}><X size={15} /></IconButton></div>}
+        {(view === "overview" || view === "movements") && <div className="filterbar"><div className="period-select"><CalendarDays size={17} /><select aria-label="Periodo" value={period} onChange={event => setRange(event.target.value)}><option value="month">Questo mese</option><option value="previous">Mese scorso</option><option value="3">Ultimi 3 mesi</option><option value="6">Ultimi 6 mesi</option><option value="12">Ultimi 12 mesi</option><option value="all">Tutto lo storico</option><option value="custom">Personalizzato</option></select></div><div className="date-range"><input aria-label="Data iniziale" type="date" value={from} max={to} onChange={event => { if (event.target.value) { setFrom(event.target.value); setPeriod("custom"); } }} /><span>/</span><input aria-label="Data finale" type="date" value={to} min={from} onChange={event => { if (event.target.value) { setTo(event.target.value); setPeriod("custom"); } }} /></div><select aria-label="Filtro categoria" value={category} onChange={event => setCategory(event.target.value)}><option value="">Tutte le categorie</option>{data.categories.map(item => <option key={item.name}>{item.name}</option>)}<option>Da categorizzare</option></select><IconButton title="Esporta movimenti filtrati" onClick={download}><Download size={17} /></IconButton></div>}
+        {loading && <div className="loading" role="status"><LoaderCircle className="spin" size={19} />Caricamento dei movimenti...</div>}
+        {view === "overview" && <>
+          <section className="metrics" aria-label="Riepilogo del periodo">{[
+            { label: "Entrate", amount: stats.income, icon: ArrowDownLeft, className: "green", note: "Redditi del periodo" },
+            { label: "Spese nette", amount: stats.netExpense, icon: ArrowUpRight, className: "", note: `${money(stats.refunds)} di rimborsi` },
+            { label: "Risultato del periodo", amount: stats.result, icon: ChartNoAxesCombined, className: stats.result >= 0 ? "green" : "negative", note: "Entrate meno spese nette" },
+            { label: "Uscite registrate", amount: stats.outgoing, icon: ArrowDownToLine, className: "", note: "Inclusi prelievi e trasferimenti" },
+          ].map(item => <div className="metric" key={item.label}><div className="metric-label">{item.label}<item.icon size={17} /></div><strong className={item.className}>{money(item.amount)}</strong><span>{item.note}</span></div>)}</section>
+          <div className="charts-grid"><section className="chart-section"><div className="section-heading"><div><h2>Entrate e spese</h2><span>Andamento del periodo</span></div><div className="legend"><span><i className="legend-dot green-bg" />Entrate</span><span><i className="legend-dot yellow-bg" />Spese nette</span></div></div>
+            {stats.selected.length ? <div className="chart" role="img" aria-label="Grafico delle entrate e spese nette nel periodo"><ResponsiveContainer width="100%" height="100%"><AreaChart data={timeline} margin={{ top: 15, right: 12, left: -10, bottom: 0 }}><CartesianGrid strokeDasharray="3 5" vertical={false} stroke="#e3e8e5" /><XAxis dataKey="month" tickFormatter={trendLabel} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#747e78" }} /><YAxis tickFormatter={value => `${value} €`} axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: "#747e78" }} /><Tooltip formatter={value => money(Number(value) * 100)} labelFormatter={label => String(label)} contentStyle={{ borderRadius: 6, border: "1px solid #dce3df" }} /><Area name="Entrate" type="linear" dataKey="income" stroke="#19765b" fill="#19765b" fillOpacity={0.06} strokeWidth={2.5} connectNulls={false} dot={{ r: 3 }} /><Area name="Spese nette" type="linear" dataKey="expense" stroke="#ca9829" fill="#ca9829" fillOpacity={0.06} strokeWidth={2.5} connectNulls={false} dot={{ r: 3 }} /></AreaChart></ResponsiveContainer></div> : <Empty title="Nessun movimento nel periodo" />}
+          </section><section className="chart-section category-chart"><div className="section-heading"><div><h2>Dove vanno le spese</h2><span>Importi netti per categoria</span></div><IconButton title="Apri categorie" onClick={() => setView("categories")}><ArrowUpRight size={18} /></IconButton></div>
+            {stats.byCategory.length ? <div className="category-bars">{stats.byCategory.slice(0, 6).map((item, index) => <button key={item.name} className="category-bar" onClick={() => { setCategory(item.name); setView("movements"); }}><span><i style={{ background: data.categories.find(cat => cat.name === item.name)?.color || colors[index % colors.length] }} />{item.name}<strong>{money(item.amount)}</strong></span><span className="bar-track"><i style={{ width: `${Math.min(100, Math.abs(item.amount) / Math.max(...stats.byCategory.map(cat => Math.abs(cat.amount)), 1) * 100)}%`, background: data.categories.find(cat => cat.name === item.name)?.color || colors[index % colors.length] }} /></span></button>)}</div> : <Empty title="Nessuna spesa categorizzata" />}
+            <div className="chart-total"><span>Totale spese nette</span><strong>{money(stats.netExpense)}</strong></div>
+          </section></div>
+          <section className="account-band"><div className="bank-emblem">F</div><div className="account-name"><strong>Fineco</strong><span>{data.bank.length ? "Saldo comunicato dalla banca" : "Nessun conto collegato"}</span></div><div className="account-balance">{data.bank.map(bank => { const balance = bank.balance?.balances?.find(item => item.balance_amount.currency === "EUR" && item.balance_type === "ITAV") || bank.balance?.balances?.find(item => item.balance_amount.currency === "EUR"); return balance ? <strong key={bank.account_key}>{money(parseMoney(balance.balance_amount.amount, "en"))}</strong> : null; })}</div><div className="sync-note"><span className={`status-dot ${!data.bank.length ? "muted" : ""}`} />{data.bank[0]?.synced_at ? `Aggiornato ${new Date(data.bank[0].synced_at).toLocaleString("it-IT", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}` : "In attesa di collegamento"}</div><IconButton title="Sincronizza Fineco" disabled={busy || demo} onClick={() => void run(async () => { const result = await mutate({ action: "sync" }); setNotice(`${result.inserted || 0} nuovi movimenti importati`); })}><RefreshCw size={18} /></IconButton></section>
+          <section className="movements-section"><div className="section-heading"><div><h2>Ultimi movimenti</h2><span>{stats.selected.length} movimenti nel periodo</span></div><button className="text-button inline" onClick={() => setView("movements")}>Tutti i movimenti<ArrowRight size={16} /></button></div>{renderTable(transactions.slice(0, 6))}</section>
+        </>}
+        {view === "movements" && <>
+          <div className="movement-tools"><label className="search-field"><Search size={18} /><input aria-label="Cerca movimenti" placeholder="Cerca un movimento..." value={search} onChange={event => setSearch(event.target.value)} /></label><div className="kind-filter"><ListFilter size={17} /><select aria-label="Tipo di movimento" value={kind} onChange={event => setKind(event.target.value)}><option value="">Tutti i tipi</option>{Object.entries(labels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></div><span>{transactions.length} risultati</span></div>
+          {pending.length > 0 && <section className="reconciliation"><h2>Da riconciliare</h2>{pending.slice(0, 10).map(({ manual, bank }) => <div key={`${manual.id}-${bank.id}`}><span>{manual.description} ↔ {bank.description} · {money(Math.abs(manual.amount_cents))}</span><button className="secondary" disabled={busy} onClick={() => void run(async () => { await mutate({ action: "reconcile", manual: manual.id, bank: bank.id }); setNotice("Pagamento riconciliato: conteggiato una sola volta"); })}>Conferma collegamento</button></div>)}</section>}
+          {renderTable(transactions.slice(page * 15, page * 15 + 15))}<div className="pagination"><span>Pagina {page + 1} di {Math.max(1, Math.ceil(transactions.length / 15))}</span><IconButton title="Pagina precedente" disabled={!page} onClick={() => setPage(page - 1)}><ChevronLeft size={18} /></IconButton><IconButton title="Pagina successiva" disabled={(page + 1) * 15 >= transactions.length} onClick={() => setPage(page + 1)}><ChevronRight size={18} /></IconButton></div>
+        </>}
+        {(view === "overview" || view === "movements") && <div className="coverage-note"><CircleHelp size={15} /><span>{dates.length ? `Movimenti disponibili: ${shortDate(dates[0])} ${dates[0].slice(0, 4)} – ${shortDate(dates.at(-1)!)} ${dates.at(-1)!.slice(0, 4)}. Copertura ${data.coverage.some(item => item.verified && item.from_date <= from && item.to_date >= to) ? "verificata per il periodo" : "non garantita: eventuali lacune non equivalgono a zero spese"}.` : "Nessun dato importato. I periodi senza dati non indicano zero spese."}{data.transactions.some(transaction => transaction.currency !== "EUR") ? " Le analisi in EUR escludono le altre valute." : ""}</span></div>}
+        {view === "categories" && <>
+          <section className="settings-section"><div className="section-heading"><div><h2>Le tue categorie</h2><span>{data.categories.length} categorie</span></div></div><div className="swatch-list">{data.categories.map(item => <label key={item.name}><input aria-label={`Colore ${item.name}`} type="color" defaultValue={item.color} disabled={busy} onBlur={event => { if (event.target.value !== item.color) void run(async () => { await mutate({ action: "category", name: item.name, color: event.target.value }); }); }} /><span>{item.name}</span></label>)}</div><form className="inline-form" onSubmit={event => { event.preventDefault(); const form = new FormData(event.currentTarget); const element = event.currentTarget; void run(async () => { await mutate({ action: "category", name: form.get("name"), color: form.get("color") }); element.reset(); }); }}><label>Nuova categoria<input name="name" maxLength={60} required placeholder="Nome categoria" /></label><label>Colore<input name="color" type="color" defaultValue="#19765b" /></label><button className="primary" disabled={busy}><Plus size={16} />Aggiungi</button></form></section>
+          <form className="inline-form" onSubmit={event => { event.preventDefault(); const form = new FormData(event.currentTarget); const element = event.currentTarget; void run(async () => { await mutate({ action: "renameCategory", oldName: form.get("oldName"), newName: form.get("newName") }); element.reset(); setNotice("Categoria rinominata"); }); }}><label>Categoria da rinominare{categorySelect("oldName", data.categories[0]?.name, false)}</label><label>Nuovo nome<input name="newName" maxLength={60} required /></label><button className="secondary" disabled={busy}><Settings2 size={16} />Rinomina categoria</button></form>
+          <section className="settings-section"><div className="section-heading"><div><h2>Regole automatiche</h2><span>Priorita inferiore applicata per prima</span></div><button className="secondary" disabled={busy} onClick={() => void run(async () => { await mutate({ action: "applyRules" }); setNotice("Regole applicate ai movimenti senza correzioni manuali"); })}><RefreshCw size={16} />Applica allo storico</button></div><div className="rule-list">{data.rules.map(rule => <div key={rule.id}><span className="rule-priority">{rule.priority}</span><strong>{rule.pattern}</strong><ArrowRight size={14} /><span>{rule.category}</span><IconButton title={`Elimina regola ${rule.pattern}`} disabled={busy} onClick={() => void run(async () => { await mutate({ action: "deleteRule", id: rule.id }); })}><Trash2 size={15} /></IconButton></div>)}</div><form className="inline-form" onSubmit={event => { event.preventDefault(); const form = new FormData(event.currentTarget); const element = event.currentTarget; void run(async () => { await mutate({ action: "rule", pattern: form.get("pattern"), category: form.get("category"), priority: Number(form.get("priority")) }); element.reset(); }); }}><label>Descrizione contiene<input name="pattern" maxLength={150} required placeholder="Es. esselunga" /></label><label>Categoria{categorySelect("category", data.categories[0]?.name, false)}</label><label>Priorita<input name="priority" type="number" min={0} max={1000} defaultValue={10} required /></label><button className="primary" disabled={busy}><Plus size={16} />Salva regola</button></form></section>
+        </>}
+        {view === "settings" && <>
+          <section className="settings-section"><div className="section-heading"><div><h2>Collegamento Fineco</h2><span>Accesso in sola lettura tramite Enable Banking</span></div><CreditCard size={23} /></div>{data.bank.map(bank => <div key={bank.account_key} className="bank-status"><span>Conto {bank.account_key.slice(0, 12)}...</span><span>Consenso fino al {new Date(bank.valid_until).toLocaleDateString("it-IT")}</span>{bank.last_error && <p className="notice error">{bank.last_error}</p>}</div>)}<div className="button-row"><button className="primary" disabled={demo || busy} onClick={() => void run(async () => { const response = await fetch("/api/bank/connect", { method: "POST" }); const result = await response.json(); if (!response.ok) throw new Error(result.error); location.assign(result.url); })}><CreditCard size={17} />{data.bank.length ? "Rinnova collegamento" : "Collega Fineco"}</button><button className="secondary" disabled={demo || busy || !data.bank.length} onClick={() => void run(async () => { const result = await mutate({ action: "sync" }); setNotice(`${result.inserted || 0} nuovi movimenti`); })}><RefreshCw size={16} />Sincronizza ora</button></div></section>
+          <section className="settings-section"><div className="section-heading"><div><h2>Passkey e dispositivi</h2><span>Accesso alternativo · funzionalita sperimentale</span></div><Fingerprint size={25} /></div><div className="button-row"><button className="primary" disabled={demo || busy} onClick={() => void run(async () => { const db = browserDb(); if (!db) return; const result = await db.auth.registerPasskey(); if (result.error) throw result.error; setNotice("Passkey registrata"); })}><Fingerprint size={18} />Registra passkey</button><button className="secondary" disabled={demo || busy} onClick={() => void run(async () => { const result = await browserDb()?.auth.passkey.list(); if (result?.error) throw result.error; setFactorList(result?.data || []); })}><Settings2 size={17} />Gestisci passkey</button></div>{factorList.map(item => <div className="passkey-row" key={item.id}><span>{item.friendly_name || "Passkey"}</span><IconButton title="Revoca passkey" disabled={busy} onClick={() => void run(async () => { const result = await browserDb()?.auth.passkey.delete({ passkeyId: item.id }); if (result?.error) throw result.error; setFactorList(factorList.filter(factor => factor.id !== item.id)); })}><Trash2 size={16} /></IconButton></div>)}<p className="muted-text">Email, password e Authenticator restano disponibili. Se la sessione passkey non soddisfa il livello di sicurezza richiesto, viene richiesto anche Authenticator.</p></section>
+          <section className="settings-section"><h2>Password e recupero</h2><form className="inline-form" onSubmit={event => { event.preventDefault(); const form = new FormData(event.currentTarget); const element = event.currentTarget; void run(async () => { const result = await browserDb()?.auth.updateUser({ password: String(form.get("password")) }); if (result?.error) throw result.error; element.reset(); setNotice("Password aggiornata"); }); }}><label>Nuova password<input type="password" name="password" minLength={12} required autoComplete="new-password" /></label><button className="secondary" disabled={demo || busy}>Aggiorna password</button></form><p className="muted-text">Conserva una copia sicura del tuo Authenticator. Il recupero della password non disattiva il secondo fattore.</p></section>
+        </>}
+      </main><footer className="app-footer"><span>HelpMe · Finanze personali</span><span>{demo ? "Ambiente dimostrativo" : "Il tuo spazio riservato"}<ShieldCheck size={13} /></span></footer>
+    </div>
+    <dialog ref={dialogRef} className="modal" onCancel={() => setModal(null)} onClose={() => setModal(null)}><div className="modal-header"><h2>{modal === "manual" ? "Nuovo movimento" : modal === "edit" ? "Modifica movimento" : "Importa movimenti"}</h2><IconButton title="Chiudi finestra" onClick={() => setModal(null)}><X size={20} /></IconButton></div>
+      {notice && <p className="notice" role="alert">{notice}</p>}
+      {modal === "manual" && <form onSubmit={saveManual} className="modal-form"><div className="form-grid"><label>Data operazione<input name="date" type="date" defaultValue={localDate(now)} required /></label><label>Tipo{kindSelect()}</label></div><label>Descrizione<input name="description" maxLength={2000} required placeholder="Es. Cena al ristorante" /></label><div className="form-grid"><label>Importo EUR<input name="amount" inputMode="decimal" required placeholder="30,00" /></label><label>Categoria{categorySelect("category")}</label></div><label>Conto<select name="account" required><option value="cash">Contanti</option>{[...new Set([...data.bank.map(bank => bank.account_key), ...data.transactions.filter(transaction => transaction.account_key !== "cash").map(transaction => transaction.account_key)])].map(account => <option key={account} value={account}>Fineco · {account.slice(0, 12)}</option>)}</select></label><label>Spesa originale (solo per rimborso){refundSelect()}</label><button className="primary wide" disabled={busy}><Plus size={16} />Salva movimento</button></form>}
+      {modal === "edit" && editing && <form className="modal-form" onSubmit={event => { event.preventDefault(); const form = new FormData(event.currentTarget); void run(async () => { await mutate({ action: "edit", id: editing.id, kind: form.get("kind"), category: form.get("category") || null, refund_of: form.get("refund_of") || null }); setModal(null); }); }}><p className="edit-description">{editing.description}<strong>{money(editing.amount_cents)}</strong></p><label>Tipo{kindSelect(editing.kind)}</label><label>Categoria{categorySelect("category", editing.category)}</label><label>Spesa originale (solo per rimborso){refundSelect(editing.refund_of)}</label><button className="primary wide" disabled={busy}>Salva modifiche</button>{editing.source === "manual" && <button type="button" className="danger-button" disabled={busy} onClick={() => { if (confirm("Eliminare questa spesa manuale?")) void run(async () => { await mutate({ action: "delete", id: editing.id }); setModal(null); }); }}><Trash2 size={16} />Elimina movimento manuale</button>}</form>}
+      {modal === "import" && <div className="modal-form"><label className="file-drop"><Upload size={25} /><strong>Seleziona un file CSV</strong><span>Massimo 1,5 MB</span><input aria-label="File CSV" type="file" accept=".csv,text/csv" onChange={event => { const file = event.target.files?.[0]; if (!file) return; void run(async () => { if (file.size > 1500000) throw new Error("File troppo grande"); const text = await file.text(); const parsed = readCsv(text); setCsv(text); setHeaders(parsed.headers); const find = (pattern: RegExp) => parsed.headers.find(header => pattern.test(header)) || ""; setMapping({ date: find(/^data.*oper|^data$/i), description: find(/descrizione|causale/i), amount: find(/importo|uscite|addebiti/i), credit: find(/entrate|accrediti/i) || undefined, locale: "it", account: data.bank[0]?.account_key || "fineco" }); setImportError(""); }); }} /></label>
+        {headers.length > 0 && <><div className="form-grid">{([['date','Data operazione'],['description','Descrizione'],['amount','Importo / Uscite'],['credit','Entrate (opzionale)'],['currency','Valuta (opzionale)'],['reference','Riferimento (opzionale)']] as const).map(([key,label]) => <label key={key}>{label}<select value={mapping[key] || ""} onChange={event => setMapping({ ...mapping, [key]: event.target.value || undefined })}><option value="">Seleziona</option>{headers.map(header => <option key={header}>{header}</option>)}</select></label>)}<label>Formato importi<select value={mapping.locale} onChange={event => setMapping({ ...mapping, locale: event.target.value as "it" | "en" })}><option value="it">Italiano · 1.234,56</option><option value="en">Internazionale · 1,234.56</option></select></label><label>Conto<select value={mapping.account} onChange={event => setMapping({ ...mapping, account: event.target.value })}>{[...new Set(["fineco", ...data.bank.map(bank => bank.account_key), ...data.transactions.filter(transaction => transaction.account_key !== "cash").map(transaction => transaction.account_key)])].map(account => <option key={account} value={account}>{account === "fineco" ? "Fineco (CSV non collegato)" : `Fineco · ${account.slice(0, 12)}`}</option>)}</select></label></div>
+          {preview && <div className="csv-preview"><strong>{preview.transactions.length} movimenti validi · {preview.errors.length} errori</strong>{preview.errors.slice(0, 5).map(error => <p className="negative" key={error}>{error}</p>)}{preview.transactions.slice(0, 3).map((transaction, index) => <div key={index}><span>{transaction.date} · {transaction.description}</span><strong>{money(transaction.amount_cents)}</strong></div>)}</div>}
+          {importError && <p role="alert">{importError}</p>}<button className="primary wide" disabled={busy || !preview?.transactions.length || !!preview?.errors.length} onClick={() => void run(async () => { const result = await mutate({ action: "import", csv, mapping }); setModal(null); setNotice(demo ? "Movimenti importati nell'anteprima" : `${result.inserted} movimenti importati; ${result.duplicates} duplicati ignorati`); })}><Upload size={16} />Conferma importazione</button>
+        </>}
+      </div>}
+    </dialog>
+  </div>;
+
+  function renderTable(rows: Transaction[]) {
+    if (!rows.length) return <Empty title="Nessun movimento trovato" />;
+    return <div className="table-scroll"><table><thead><tr><th>Movimento</th><th>Data</th><th>Categoria</th><th>Origine</th><th className="amount-cell">Importo</th><th><span className="sr-only">Azioni</span></th></tr></thead><tbody>{rows.map(transaction => <tr key={transaction.id}><td><div className="transaction-name"><span className={`transaction-icon ${transaction.amount_cents > 0 ? "incoming" : ""}`}>{transaction.amount_cents > 0 ? <ArrowDownLeft size={18} /> : transaction.kind === "withdrawal" ? <Wallet size={18} /> : <CreditCard size={17} />}</span><div><button className="transaction-open" aria-label={`Apri movimento ${transaction.description}`} onClick={() => { setEditing(transaction); setModal("edit"); }}><strong>{transaction.description}</strong></button><span>{labels[transaction.kind]}{transaction.account_key === "cash" ? " · Contanti" : ""}</span></div></div></td><td className="date-cell">{shortDate(transaction.date)}</td><td><button className={`category-tag ${!transaction.category ? "unassigned" : ""}`} onClick={() => { setEditing(transaction); setModal("edit"); }}><i style={{ background: data.categories.find(item => item.name === transaction.category)?.color || "#b29d69" }} />{transaction.category || "Da categorizzare"}</button></td><td className="source-cell">{transaction.source === "api" ? "Fineco" : transaction.source === "manual" ? "Manuale" : "CSV"}</td><td className={`amount-cell ${transaction.amount_cents > 0 ? "green" : ""}`}>{transaction.currency === "EUR" ? money(transaction.amount_cents) : `${(transaction.amount_cents / 100).toFixed(2)} ${transaction.currency}`}</td><td><IconButton title={`Modifica ${transaction.description}`} onClick={() => { setEditing(transaction); setModal("edit"); }}><SlidersHorizontal size={15} /></IconButton></td></tr>)}</tbody></table></div>;
+  }
+}
+
+function Empty({ title }: { title: string }) { return <div className="empty-state"><Wallet size={29} /><span>{title}</span></div>; }
